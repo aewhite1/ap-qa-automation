@@ -1,370 +1,286 @@
-# Point Cloud Quality Checks for AgTech 3D Models
-# This module implements quality checks for 3D point clouds in Databricks pipelines
+"""
+Point Cloud Quality Checks
 
-import dlt
-from pyspark.sql import functions as F
-from pyspark.sql.types import *
-from pyspark.ml.linalg import Vectors, VectorUDT
-from pyspark.ml.stat import Correlation
-import numpy as np
+This module provides a unified interface for running quality checks on data
+for point cloud generation, both before and after the reconstruction process.
+"""
 
-# Register UDFs for point cloud analysis
-@F.udf(returnType=BooleanType())
-def check_ground_plane_orientation(points_json):
+import os
+import logging
+import json
+from typing import Dict, List, Tuple, Union, Optional, Any
+import time
+from pathlib import Path
+
+from point_cloud_quality_checks_preprocessing import PointCloudQualityPreCheck, check_images_for_point_cloud, check_video_for_point_cloud
+from point_cloud_quality_checks_postprocessing import PointCloudQualityPostCheck, check_point_cloud_quality
+from point_cloud_quality_visualization import visualize_point_cloud_quality
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+class PointCloudQualityPipeline:
     """
-    Check if the ground plane is properly oriented (not flipped or severely tilted).
+    Pipeline for running quality checks on data for point cloud generation.
+    """
     
-    Args:
-        points_json: JSON string containing point cloud data with x, y, z coordinates
+    def __init__(self, output_dir: Optional[str] = None):
+        """
+        Initialize the quality check pipeline.
         
-    Returns:
-        Boolean indicating if the ground plane orientation is valid
-    """
-    try:
-        import json
-        from sklearn.linear_model import RANSACRegressor
+        Args:
+            output_dir: Directory to save results and visualizations
+        """
+        self.output_dir = output_dir
         
-        # Parse points from JSON
-        points = json.loads(points_json)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
         
-        # Extract x, y, z coordinates
-        xs = [p['x'] for p in points]
-        ys = [p['y'] for p in points]
-        zs = [p['z'] for p in points]
-        
-        # Create feature matrix (x, y) and target (z)
-        X = np.column_stack((xs, ys))
-        y = np.array(zs)
-        
-        # Fit RANSAC regressor to find ground plane
-        ransac = RANSACRegressor()
-        ransac.fit(X, y)
-        
-        # Get plane normal vector (coefficients and intercept)
-        coef = ransac.estimator_.coef_
-        
-        # Calculate angle between normal vector and vertical (0, 0, 1)
-        normal_vector = np.append(coef, 1.0)
-        normal_vector = normal_vector / np.linalg.norm(normal_vector)
-        vertical = np.array([0, 0, 1])
-        
-        # Calculate angle in degrees
-        angle = np.arccos(np.dot(normal_vector, vertical)) * 180 / np.pi
-        
-        # Check if angle is within threshold (e.g., 30 degrees)
-        return angle < 30
-    except:
-        return False
-
-@F.udf(returnType=BooleanType())
-def check_point_density_distribution(points_json):
-    """
-    Check if the point cloud has a relatively uniform density distribution.
+        # Results storage
+        self.preprocessing_results = None
+        self.postprocessing_results = None
+        self.point_cloud = None
     
-    Args:
-        points_json: JSON string containing point cloud data with x, y, z coordinates
+    def check_input_data(self, 
+                        input_path: str, 
+                        input_type: str = "auto",
+                        min_images: int = 20,
+                        min_resolution: Tuple[int, int] = (1080, 720),
+                        min_texture_score: float = 0.3,
+                        max_blur_threshold: float = 100.0,
+                        min_overlap_score: float = 0.5,
+                        min_viewpoint_variation: float = 15.0,
+                        max_viewpoint_variation: float = 45.0,
+                        max_exposure_variation: float = 0.5,
+                        sample_rate: int = 1,
+                        visualize: bool = True) -> Dict:
+        """
+        Run quality checks on input data (images or video).
         
-    Returns:
-        Boolean indicating if the point density distribution is valid
-    """
-    try:
-        import json
-        import numpy as np
-        from scipy.spatial import ConvexHull
+        Args:
+            input_path: Path to image folder or video file
+            input_type: Type of input data ("images", "video", or "auto" to detect)
+            min_images: Minimum number of images required
+            min_resolution: Minimum image resolution (width, height)
+            min_texture_score: Minimum texture score (0-1)
+            max_blur_threshold: Maximum blur threshold (lower values are more blurry)
+            min_overlap_score: Minimum overlap score between consecutive images (0-1)
+            min_viewpoint_variation: Minimum camera movement between images (degrees)
+            max_viewpoint_variation: Maximum camera movement between images (degrees)
+            max_exposure_variation: Maximum variation in exposure/brightness
+            sample_rate: Sample every nth frame for video
+            visualize: Whether to visualize results
+            
+        Returns:
+            Dictionary with check results
+        """
+        logger.info(f"Checking input data: {input_path}")
         
-        # Parse points from JSON
-        points = json.loads(points_json)
-        
-        # Extract x, y, z coordinates
-        xs = [p['x'] for p in points]
-        ys = [p['y'] for p in points]
-        zs = [p['z'] for p in points]
-        
-        # Create point array
-        point_array = np.column_stack((xs, ys, zs))
-        
-        # Compute convex hull
-        hull = ConvexHull(point_array)
-        
-        # Compute volume of convex hull
-        volume = hull.volume
-        
-        # Compute point density (points per unit volume)
-        density = len(points) / volume
-        
-        # Divide space into octants and check density in each
-        octant_counts = [0] * 8
-        center = np.mean(point_array, axis=0)
-        
-        for point in point_array:
-            # Determine octant (0-7)
-            octant = 0
-            if point[0] > center[0]: octant |= 1
-            if point[1] > center[1]: octant |= 2
-            if point[2] > center[2]: octant |= 4
-            octant_counts[octant] += 1
-        
-        # Calculate density variation across octants
-        octant_densities = [count / len(points) for count in octant_counts]
-        density_variation = np.std(octant_densities)
-        
-        # Check if density variation is within threshold
-        # Lower variation means more uniform distribution
-        return density_variation < 0.2
-    except:
-        return False
-
-@F.udf(returnType=BooleanType())
-def check_noise_level(points_json):
-    """
-    Check if the point cloud has acceptable noise levels.
-    
-    Args:
-        points_json: JSON string containing point cloud data with x, y, z coordinates
-        
-    Returns:
-        Boolean indicating if the noise level is acceptable
-    """
-    try:
-        import json
-        import numpy as np
-        from sklearn.neighbors import NearestNeighbors
-        
-        # Parse points from JSON
-        points = json.loads(points_json)
-        
-        # Extract x, y, z coordinates
-        xs = [p['x'] for p in points]
-        ys = [p['y'] for p in points]
-        zs = [p['z'] for p in points]
-        
-        # Create point array
-        point_array = np.column_stack((xs, ys, zs))
-        
-        # Find k nearest neighbors for each point
-        k = 10  # Number of neighbors to consider
-        nbrs = NearestNeighbors(n_neighbors=k).fit(point_array)
-        distances, indices = nbrs.kneighbors(point_array)
-        
-        # Calculate average distance to neighbors for each point
-        avg_distances = np.mean(distances, axis=1)
-        
-        # Calculate global average and standard deviation
-        global_avg = np.mean(avg_distances)
-        global_std = np.std(avg_distances)
-        
-        # Count outliers (points with avg distance > global_avg + 2*global_std)
-        outlier_threshold = global_avg + 2 * global_std
-        outlier_count = np.sum(avg_distances > outlier_threshold)
-        outlier_ratio = outlier_count / len(points)
-        
-        # Check if outlier ratio is within threshold
-        return outlier_ratio < 0.1
-    except:
-        return False
-
-@F.udf(returnType=BooleanType())
-def check_arc_distortion(points_json):
-    """
-    Check if the point cloud has arc distortion (one side dropping off).
-    
-    Args:
-        points_json: JSON string containing point cloud data with x, y, z coordinates
-        
-    Returns:
-        Boolean indicating if there is no significant arc distortion
-    """
-    try:
-        import json
-        import numpy as np
-        from sklearn.decomposition import PCA
-        
-        # Parse points from JSON
-        points = json.loads(points_json)
-        
-        # Extract x, y, z coordinates
-        xs = [p['x'] for p in points]
-        ys = [p['y'] for p in points]
-        zs = [p['z'] for p in points]
-        
-        # Create point array
-        point_array = np.column_stack((xs, ys, zs))
-        
-        # Perform PCA to find principal components
-        pca = PCA(n_components=3)
-        pca.fit(point_array)
-        
-        # Transform points to principal component space
-        transformed = pca.transform(point_array)
-        
-        # Divide points into bins along the first principal component
-        num_bins = 10
-        bin_indices = np.floor(num_bins * (transformed[:, 0] - np.min(transformed[:, 0])) / 
-                              (np.max(transformed[:, 0]) - np.min(transformed[:, 0]))).astype(int)
-        bin_indices = np.clip(bin_indices, 0, num_bins - 1)
-        
-        # Calculate average height (z in original space) for each bin
-        bin_heights = []
-        for i in range(num_bins):
-            bin_points = point_array[bin_indices == i]
-            if len(bin_points) > 0:
-                bin_heights.append(np.mean(bin_points[:, 2]))
+        # Determine input type if auto
+        if input_type == "auto":
+            if os.path.isdir(input_path):
+                input_type = "images"
+            elif os.path.isfile(input_path) and input_path.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
+                input_type = "video"
             else:
-                bin_heights.append(np.nan)
+                logger.error(f"Could not automatically determine input type for {input_path}")
+                return {"error": f"Could not automatically determine input type for {input_path}"}
         
-        # Remove NaN values
-        bin_heights = [h for h in bin_heights if not np.isnan(h)]
+        # Create pre-processing checker
+        pre_checker = PointCloudQualityPreCheck(
+            min_images=min_images,
+            min_resolution=min_resolution,
+            min_texture_score=min_texture_score,
+            max_blur_threshold=max_blur_threshold,
+            min_overlap_score=min_overlap_score,
+            min_viewpoint_variation=min_viewpoint_variation,
+            max_viewpoint_variation=max_viewpoint_variation,
+            max_exposure_variation=max_exposure_variation
+        )
         
-        # Check for monotonic decrease or increase (arc distortion)
-        if len(bin_heights) < 3:
-            return True  # Not enough bins to detect arc
+        # Run checks based on input type
+        if input_type == "images":
+            self.preprocessing_results = pre_checker.check_image_folder(input_path)
+        else:  # video
+            self.preprocessing_results = pre_checker.check_video(input_path, sample_rate=sample_rate)
         
-        # Calculate differences between consecutive bins
-        diffs = np.diff(bin_heights)
+        # Save results
+        if self.output_dir:
+            # Save results
+            pre_checker.save_results(os.path.join(self.output_dir, f"preprocessing_results.json"))
+            
+            # Save report
+            with open(os.path.join(self.output_dir, f"preprocessing_report.txt"), 'w') as f:
+                f.write(pre_checker.get_detailed_report())
         
-        # Check if all differences have the same sign (monotonic)
-        all_increasing = np.all(diffs > 0)
-        all_decreasing = np.all(diffs < 0)
+        # Print report
+        print(pre_checker.get_detailed_report())
         
-        # If monotonically increasing or decreasing, it might indicate arc distortion
-        monotonic = all_increasing or all_decreasing
+        # Visualize results
+        if visualize and self.output_dir:
+            pre_checker.visualize_results(self.output_dir)
         
-        # Calculate the maximum height difference
-        max_height_diff = np.max(bin_heights) - np.min(bin_heights)
-        avg_height = np.mean(bin_heights)
-        relative_diff = max_height_diff / avg_height
+        return self.preprocessing_results
+    
+    def check_point_cloud(self, 
+                         point_cloud_path: str,
+                         min_points: int = 10000,
+                         min_density: float = 100.0,
+                         max_noise_ratio: float = 0.1,
+                         min_completeness: float = 0.8,
+                         max_outlier_ratio: float = 0.05,
+                         min_color_consistency: float = 0.7,
+                         visualize: bool = True) -> Dict:
+        """
+        Run quality checks on a point cloud.
         
-        # Check if the height difference is significant and monotonic
-        return not (monotonic and relative_diff > 0.3)
-    except:
-        return False
+        Args:
+            point_cloud_path: Path to point cloud file
+            min_points: Minimum number of points required
+            min_density: Minimum point density (points per cubic meter)
+            max_noise_ratio: Maximum ratio of noise points
+            min_completeness: Minimum completeness score (0-1)
+            max_outlier_ratio: Maximum ratio of outlier points
+            min_color_consistency: Minimum color consistency score (0-1)
+            visualize: Whether to visualize results
+            
+        Returns:
+            Dictionary with check results
+        """
+        logger.info(f"Checking point cloud: {point_cloud_path}")
+        
+        # Create post-processing checker
+        post_checker = PointCloudQualityPostCheck(
+            min_points=min_points,
+            min_density=min_density,
+            max_noise_ratio=max_noise_ratio,
+            min_completeness=min_completeness,
+            max_outlier_ratio=max_outlier_ratio,
+            min_color_consistency=min_color_consistency
+        )
+        
+        # Run checks
+        self.postprocessing_results = post_checker.check_point_cloud(point_cloud_path)
+        
+        # Save point cloud reference
+        try:
+            import open3d as o3d
+            self.point_cloud = o3d.io.read_point_cloud(point_cloud_path)
+        except Exception as e:
+            logger.warning(f"Failed to load point cloud for visualization: {str(e)}")
+        
+        # Save results
+        if self.output_dir:
+            # Save results
+            post_checker.save_results(os.path.join(self.output_dir, "postprocessing_results.json"))
+            
+            # Save report
+            with open(os.path.join(self.output_dir, "postprocessing_report.txt"), 'w') as f:
+                f.write(post_checker.get_detailed_report())
+        
+        # Print report
+        print(post_checker.get_detailed_report())
+        
+        # Visualize results
+        if visualize and self.output_dir:
+            post_checker.visualize_results(self.output_dir)
+        
+        return self.postprocessing_results
+    
+    def create_combined_visualization(self, show_plots: bool = True) -> None:
+        """
+        Create combined visualizations for both pre-processing and post-processing results.
+        
+        Args:
+            show_plots: Whether to display plots
+        """
+        if not self.preprocessing_results and not self.postprocessing_results:
+            logger.warning("No results to visualize")
+            return
+        
+        if not self.output_dir:
+            logger.warning("No output directory specified for visualizations")
+            return
+        
+        # Create visualizations
+        visualize_point_cloud_quality(
+            preprocessing_results=self.preprocessing_results,
+            postprocessing_results=self.postprocessing_results,
+            point_cloud=self.point_cloud,
+            output_dir=self.output_dir,
+            show_plots=show_plots,
+            create_report=True
+        )
+        
+        logger.info(f"Combined visualizations saved to {self.output_dir}")
 
-@F.udf(returnType=BooleanType())
-def check_completeness(points_json):
+
+def run_quality_pipeline(input_path: str,
+                        point_cloud_path: Optional[str] = None,
+                        output_dir: Optional[str] = None,
+                        input_type: str = "auto",
+                        visualize: bool = True) -> Dict:
     """
-    Check if the point cloud is complete (covers the entire object).
+    Convenience function to run the complete quality check pipeline.
     
     Args:
-        points_json: JSON string containing point cloud data with x, y, z coordinates
+        input_path: Path to image folder or video file
+        point_cloud_path: Optional path to point cloud file
+        output_dir: Directory to save results and visualizations
+        input_type: Type of input data ("images", "video", or "auto" to detect)
+        visualize: Whether to visualize results
         
     Returns:
-        Boolean indicating if the point cloud is complete
+        Dictionary with check results
     """
-    try:
-        import json
-        import numpy as np
-        
-        # Parse points from JSON
-        points = json.loads(points_json)
-        
-        # Check if there are enough points
-        if len(points) < 1000:
-            return False
-        
-        # Extract x, y, z coordinates
-        xs = [p['x'] for p in points]
-        ys = [p['y'] for p in points]
-        zs = [p['z'] for p in points]
-        
-        # Create point array
-        point_array = np.column_stack((xs, ys, zs))
-        
-        # Calculate bounding box
-        min_x, min_y, min_z = np.min(point_array, axis=0)
-        max_x, max_y, max_z = np.max(point_array, axis=0)
-        
-        # Calculate dimensions
-        width = max_x - min_x
-        depth = max_y - min_y
-        height = max_z - min_z
-        
-        # Calculate aspect ratios
-        aspect_ratio_1 = width / height
-        aspect_ratio_2 = depth / height
-        
-        # Check if aspect ratios are reasonable
-        # For trees/plants, we expect height > width and height > depth
-        return aspect_ratio_1 < 2.0 and aspect_ratio_2 < 2.0
-    except:
-        return False
-
-# Define DLT pipeline for point cloud quality checks
-@dlt.table(
-    name="point_cloud_quality_metrics",
-    comment="Quality metrics for 3D point clouds"
-)
-@dlt.expect_all_or_drop({
-    "valid_ground_plane": "ground_plane_valid = true",
-    "valid_density_distribution": "density_distribution_valid = true",
-    "acceptable_noise_level": "noise_level_valid = true",
-    "no_arc_distortion": "no_arc_distortion = true",
-    "complete_point_cloud": "completeness_valid = true"
-})
-def point_cloud_quality_metrics():
-    """
-    Compute quality metrics for 3D point clouds and apply quality checks.
-    """
-    # Read point cloud data from source
-    # This assumes point cloud data is stored in a table with a 'points' column containing JSON
-    return (
-        spark.readStream.table("point_clouds")
-        .withColumn("ground_plane_valid", check_ground_plane_orientation(F.col("points")))
-        .withColumn("density_distribution_valid", check_point_density_distribution(F.col("points")))
-        .withColumn("noise_level_valid", check_noise_level(F.col("points")))
-        .withColumn("no_arc_distortion", check_arc_distortion(F.col("points")))
-        .withColumn("completeness_valid", check_completeness(F.col("points")))
-        .withColumn("quality_score", 
-                   (F.col("ground_plane_valid").cast("int") + 
-                    F.col("density_distribution_valid").cast("int") + 
-                    F.col("noise_level_valid").cast("int") + 
-                    F.col("no_arc_distortion").cast("int") + 
-                    F.col("completeness_valid").cast("int")) / 5.0)
+    # Create pipeline
+    pipeline = PointCloudQualityPipeline(output_dir=output_dir)
+    
+    # Check input data
+    preprocessing_results = pipeline.check_input_data(
+        input_path=input_path,
+        input_type=input_type,
+        visualize=visualize
     )
-
-# Define a view for point clouds that pass all quality checks
-@dlt.view(
-    name="valid_point_clouds",
-    comment="Point clouds that pass all quality checks"
-)
-def valid_point_clouds():
-    """
-    Filter point clouds that pass all quality checks.
-    """
-    return (
-        dlt.read("point_cloud_quality_metrics")
-        .filter(
-            (F.col("ground_plane_valid") == True) &
-            (F.col("density_distribution_valid") == True) &
-            (F.col("noise_level_valid") == True) &
-            (F.col("no_arc_distortion") == True) &
-            (F.col("completeness_valid") == True)
+    
+    # Check point cloud if provided
+    postprocessing_results = None
+    if point_cloud_path:
+        postprocessing_results = pipeline.check_point_cloud(
+            point_cloud_path=point_cloud_path,
+            visualize=visualize
         )
-    )
+    
+    # Create combined visualization
+    if preprocessing_results and postprocessing_results and visualize:
+        pipeline.create_combined_visualization(show_plots=visualize)
+    
+    # Return results
+    return {
+        "preprocessing": preprocessing_results,
+        "postprocessing": postprocessing_results
+    }
 
-# Define a view for point clouds that fail quality checks
-@dlt.view(
-    name="invalid_point_clouds",
-    comment="Point clouds that fail one or more quality checks"
-)
-def invalid_point_clouds():
-    """
-    Filter point clouds that fail one or more quality checks.
-    """
-    return (
-        dlt.read("point_cloud_quality_metrics")
-        .filter(
-            (F.col("ground_plane_valid") == False) |
-            (F.col("density_distribution_valid") == False) |
-            (F.col("noise_level_valid") == False) |
-            (F.col("no_arc_distortion") == False) |
-            (F.col("completeness_valid") == False)
-        )
-        .withColumn("failure_reasons", 
-                   F.concat_ws(", ",
-                              F.when(F.col("ground_plane_valid") == False, F.lit("Invalid ground plane orientation")).otherwise(F.lit("")),
-                              F.when(F.col("density_distribution_valid") == False, F.lit("Non-uniform density distribution")).otherwise(F.lit("")),
-                              F.when(F.col("noise_level_valid") == False, F.lit("Excessive noise")).otherwise(F.lit("")),
-                              F.when(F.col("no_arc_distortion") == False, F.lit("Arc distortion detected")).otherwise(F.lit("")),
-                              F.when(F.col("completeness_valid") == False, F.lit("Incomplete point cloud")).otherwise(F.lit(""))
-                             ))
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Run quality checks for point cloud generation")
+    parser.add_argument("--input", required=True, help="Path to image folder or video file")
+    parser.add_argument("--point-cloud", help="Path to point cloud file")
+    parser.add_argument("--output-dir", help="Directory to save results and visualizations")
+    parser.add_argument("--type", choices=["images", "video", "auto"], default="auto", 
+                       help="Input type (images, video, or auto to detect)")
+    parser.add_argument("--no-visualize", action="store_true", help="Don't visualize results")
+    
+    args = parser.parse_args()
+    
+    # Run pipeline
+    results = run_quality_pipeline(
+        input_path=args.input,
+        point_cloud_path=args.point_cloud,
+        output_dir=args.output_dir,
+        input_type=args.type,
+        visualize=not args.no_visualize
     )

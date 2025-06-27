@@ -1,173 +1,129 @@
-# Point Cloud Quality Checks for AgTech 3D Models
+# Point Cloud Quality Checks
 
-This repository contains implementations of quality checks for 3D point clouds in Databricks pipelines. These checks are designed to identify common issues in point clouds generated from smartphone cameras for AgTech applications, such as:
-
-- Flipped or tilted point clouds
-- Excessive noise
-- Arc distortion (one side dropping off)
-- Incomplete point clouds
-- Non-uniform density distribution
+A comprehensive suite of quality check tools for point cloud generation from images and videos. This package provides quality checks for both pre-processing (input data) and post-processing (generated point clouds) stages of the point cloud generation pipeline.
 
 ## Overview
 
-The quality checks are implemented in both Python and SQL for use in Databricks Delta Live Tables (DLT) pipelines. The checks are designed to be integrated into your existing data processing pipeline to catch problematic point clouds before they proceed to downstream processing.
+This project implements quality checks for point cloud generation using techniques like COLMAP and NeRF Studio. The quality checks help determine whether images or videos collected will create a successful point cloud before the actual reconstruction process begins, saving time and computational resources.
 
-## Implementation Options
+The quality checks are divided into two main categories:
 
-### Python Implementation (`point_cloud_quality_checks.py`)
+1. **Pre-processing Quality Checks**: Analyze input images or video frames to determine if they are suitable for point cloud generation.
+2. **Post-processing Quality Checks**: Analyze generated point clouds to evaluate their quality.
 
-The Python implementation uses PySpark and Delta Live Tables to define a pipeline that:
+## Features
 
-1. Reads point cloud data from a source table
-2. Applies multiple quality checks using User-Defined Functions (UDFs)
-3. Computes quality metrics and scores
-4. Filters point clouds into "valid" and "invalid" categories
-5. Provides detailed failure reasons for invalid point clouds
+### Pre-processing Quality Checks
 
-### SQL Implementation (`point_cloud_quality_checks.sql`)
+- **Image Count**: Ensures there are enough images for reconstruction
+- **Resolution**: Verifies images have sufficient resolution
+- **Texture**: Measures the amount of texture/detail in images
+- **Blur Detection**: Identifies and quantifies image blur
+- **Overlap**: Estimates the overlap between consecutive images
+- **Viewpoint Variation**: Analyzes camera movement between images
+- **Exposure Consistency**: Checks for consistent lighting/exposure
 
-The SQL implementation provides the same functionality but uses SQL syntax for those who prefer working with SQL in Databricks:
+### Post-processing Quality Checks
 
-1. Creates a streaming table with quality constraints
-2. Applies UDFs to perform quality checks
-3. Creates views for valid and invalid point clouds
-4. Provides historical quality metrics and failure pattern analysis
+- **Point Count**: Ensures the point cloud has enough points
+- **Density**: Measures the density of points in 3D space
+- **Noise**: Quantifies the amount of noise in the point cloud
+- **Completeness**: Evaluates how completely the point cloud covers the subject
+- **Outliers**: Identifies and quantifies outlier points
+- **Color Consistency**: Checks for consistent coloring across the point cloud
 
-## Quality Checks
+### Visualization
 
-The following quality checks are implemented:
+- Comprehensive visualizations of quality check results
+- Individual and combined reports
+- Detailed metrics and pass/fail indicators
 
-1. **Ground Plane Orientation Check**: Detects if the point cloud is flipped upside down or severely tilted off the ground axis.
-2. **Point Density Distribution Check**: Ensures the point cloud has a relatively uniform density distribution.
-3. **Noise Level Check**: Identifies point clouds with excessive noise that might distort the plant structure.
-4. **Arc Distortion Check**: Detects if the point cloud has an arc distortion where one side drops off.
-5. **Completeness Check**: Verifies if the point cloud covers the entire object with sufficient points.
-
-## Integration with Databricks
+## Installation
 
 ### Prerequisites
 
-- Databricks workspace with Delta Live Tables enabled (Premium plan)
-- PySpark and necessary libraries (numpy, scikit-learn, scipy)
-- Point cloud data stored in a table with a 'points' column containing JSON data
+- Python 3.7+
+- pip
 
-### Setup Instructions
+### Install Dependencies
 
-1. **Upload the implementation files to your Databricks workspace**:
-   - Upload `point_cloud_quality_checks.py` or `point_cloud_quality_checks.sql` to your workspace
-   - Choose the implementation that best fits your workflow (Python or SQL)
-
-2. **Create a Delta Live Tables pipeline**:
-   - Go to Workflows > Delta Live Tables > Create Pipeline
-   - Configure your pipeline settings (cluster size, target schema, etc.)
-   - Add the implementation file as a notebook or SQL file
-   - Set the development mode to "Production" for production use
-
-3. **Configure the pipeline**:
-   - Ensure your point cloud data is available in a table named `point_clouds` with a `points` column
-   - Adjust thresholds in the quality check functions if needed
-   - Set up appropriate scheduling based on your data ingestion frequency
-
-4. **Run the pipeline**:
-   - Start the pipeline to process your point cloud data
-   - Monitor the pipeline execution in the DLT UI
-   - Check the Data Quality tab to view quality metrics
-
-### Monitoring and Analysis
-
-The pipeline provides several ways to monitor and analyze point cloud quality:
-
-1. **Data Quality Metrics**: View quality metrics directly in the DLT UI under the Data Quality tab.
-2. **Valid/Invalid Point Clouds**: Query the `valid_point_clouds` and `invalid_point_clouds` views to see which point clouds passed or failed the quality checks.
-3. **Failure Reasons**: The `invalid_point_clouds` view includes detailed failure reasons for each point cloud.
-4. **Historical Trends**: The `point_cloud_quality_history` materialized view tracks quality metrics over time.
-5. **Failure Patterns**: The `point_cloud_failure_patterns` materialized view identifies common failure patterns.
-
-## Customization
-
-### Adjusting Thresholds
-
-You can adjust the thresholds in the quality check functions to match your specific requirements:
-
-- In `check_ground_plane_orientation()`, adjust the angle threshold (default: 30 degrees)
-- In `check_point_density_distribution()`, adjust the density variation threshold (default: 0.2)
-- In `check_noise_level()`, adjust the outlier ratio threshold (default: 0.1)
-- In `check_arc_distortion()`, adjust the relative difference threshold (default: 0.3)
-- In `check_completeness()`, adjust the aspect ratio thresholds (default: 2.0)
-
-### Adding New Checks
-
-To add new quality checks:
-
-1. Implement a new UDF in the Python file or register a new UDF for the SQL implementation
-2. Add the new check to the `point_cloud_quality_metrics` table/view
-3. Update the `valid_point_clouds` and `invalid_point_clouds` views to include the new check
-4. Add the new check to the failure reasons calculation
-
-## Example Usage
-
-### Querying Valid Point Clouds
-
-```sql
-SELECT * FROM valid_point_clouds
+```bash
+pip install -r requirements.txt
 ```
 
-### Querying Invalid Point Clouds with Failure Reasons
+## Usage
 
-```sql
-SELECT id, capture_date, failure_reasons 
-FROM invalid_point_clouds
-ORDER BY capture_date DESC
+See the [detailed documentation](point_cloud_quality_checks_README.md) for comprehensive usage examples and API reference.
+
+### Basic Usage
+
+```python
+from point_cloud_quality_checks import run_quality_pipeline
+
+# Run the complete quality check pipeline
+results = run_quality_pipeline(
+    input_path="path/to/images",  # Folder of images or video file
+    point_cloud_path="path/to/pointcloud.ply",  # Optional point cloud file
+    output_dir="results",  # Directory to save results
+    input_type="auto",  # Automatically detect input type (images or video)
+    visualize=True  # Generate visualizations
+)
 ```
 
-### Analyzing Quality Trends Over Time
+### Command Line Usage
 
-```sql
-SELECT 
-  processing_date,
-  total_point_clouds,
-  avg_quality_score,
-  valid_ground_plane_count / total_point_clouds AS ground_plane_success_rate,
-  valid_noise_level_count / total_point_clouds AS noise_success_rate
-FROM point_cloud_quality_history
-ORDER BY processing_date
+```bash
+# Check input data
+python point_cloud_quality_checks.py --input path/to/images --output-dir results
+
+# Check input data and point cloud
+python point_cloud_quality_checks.py --input path/to/images --point-cloud path/to/pointcloud.ply --output-dir results
 ```
 
-### Identifying Common Failure Patterns
+## Project Structure
 
-```sql
-SELECT failure_pattern, pattern_count
-FROM point_cloud_failure_patterns
-ORDER BY pattern_count DESC
-```
+- `point_cloud_quality_checks.py`: Main module providing a unified interface
+- `point_cloud_quality_checks_preprocessing.py`: Pre-processing quality checks
+- `point_cloud_quality_checks_postprocessing.py`: Post-processing quality checks
+- `point_cloud_quality_visualization.py`: Visualization tools
+- `example_usage.py`: Example usage of the quality check modules
+- `requirements.txt`: Required dependencies
+- `point_cloud_quality_checks_README.md`: Detailed documentation
 
-## Best Practices
+## Best Practices for Point Cloud Generation
 
-1. **Run quality checks early in the pipeline**: Catch issues before expensive processing steps.
-2. **Monitor quality metrics over time**: Track trends to identify systematic issues in data collection.
-3. **Adjust thresholds based on your data**: Fine-tune thresholds based on your specific use cases and equipment.
-4. **Implement feedback loops**: Use failure patterns to improve data collection procedures.
-5. **Combine with visual inspection**: For critical applications, combine automated checks with visual inspection of flagged point clouds.
+Based on the quality checks implemented in this package, here are some best practices for capturing images or videos for point cloud generation:
 
-## Troubleshooting
+### Image Capture
 
-### Common Issues
+1. **Capture enough images**: Aim for at least 20-30 images for small objects, and 50+ for larger scenes.
+2. **Use high resolution**: Higher resolution images capture more detail. Aim for at least 1080p resolution.
+3. **Ensure good lighting**: Use consistent, diffuse lighting to avoid shadows and highlights.
+4. **Avoid motion blur**: Use a tripod or fast shutter speed to minimize blur.
+5. **Capture with overlap**: Each part of the subject should appear in at least 3 different images.
+6. **Vary viewpoint gradually**: Move the camera in small increments (15-30 degrees) between shots.
+7. **Maintain consistent exposure**: Use manual exposure settings to keep lighting consistent.
+8. **Capture all sides**: Ensure complete coverage of the subject from all angles.
+9. **Include texture**: Avoid plain, textureless surfaces. Add temporary texture if needed.
+10. **Avoid reflective surfaces**: Reflections can confuse reconstruction algorithms.
 
-1. **Performance issues with large point clouds**: 
-   - Consider downsampling point clouds before quality checks
-   - Increase cluster size for the DLT pipeline
+### Video Capture
 
-2. **High false positive rate**: 
-   - Adjust thresholds to be less strict
-   - Add more sophisticated checks for your specific use case
+1. **Move slowly**: Move the camera slowly to minimize motion blur.
+2. **Orbit the subject**: Move around the subject in a complete orbit.
+3. **Vary elevation**: Capture the subject from different heights.
+4. **Use high framerate**: Higher framerates provide more images to work with.
+5. **Use high resolution**: Aim for at least 1080p resolution, preferably 4K.
+6. **Ensure good lighting**: Use consistent, diffuse lighting.
+7. **Avoid quick exposure changes**: Maintain consistent exposure throughout the video.
 
-3. **Missing dependencies**:
-   - Ensure all required libraries are installed on your Databricks cluster
-   - Use an init script to install dependencies if needed
+## References
 
-### Getting Help
+- COLMAP: https://colmap.github.io/
+- NeRF Studio: https://docs.nerf.studio/
+- Structure from Motion: https://en.wikipedia.org/wiki/Structure_from_motion
+- Neural Radiance Fields: https://www.matthewtancik.com/nerf
 
-If you encounter issues with the quality checks, check:
-- Databricks logs for error messages
-- DLT pipeline execution details
-- Data lineage in the DLT UI
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
